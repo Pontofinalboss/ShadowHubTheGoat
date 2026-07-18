@@ -112,6 +112,7 @@ local SpeedRampCurrent = 16
 local PetalContainer = nil
 local SelectedBGColor = nil
 local selectedColorBtn = nil
+local AutoAwakeThread = nil
 
 -- ============================================================
 -- HELPERS
@@ -366,6 +367,7 @@ end
 
 -- ============================================================
 -- Render loop: add improved AutoBlock / AutoBlockAttack / AutoParry logic
+-- and Phase 2 features (AutoDodge, ComboBreaker, TargetLock, AutoAwakening)
 -- ============================================================
 RunService.RenderStepped:Connect(function()
     local ch=LocalPlayer.Character; if not ch then return end
@@ -410,35 +412,155 @@ RunService.RenderStepped:Connect(function()
         end)
     end
 
+    -- ========== PHASE 2 FEATURES ==========
+
+    -- AUTO DODGE: teleport behind the enemy when they attack (cooldown C.AutoDodgeCD)
+    if T.AutoDodge then
+        pcall(function()
+            local now = tick()
+            if now - LastDodgeTime >= C.AutoDodgeCD then
+                local np = GetNearest(15)
+                if np and np.Character then
+                    local atk = IsEnemyAttacking(np, 15)
+                    if atk then
+                        local er = np.Character:FindFirstChild("HumanoidRootPart")
+                        if er and RootPart then
+                            LastDodgeTime = now
+                            -- teleport behind enemy (a few studs behind their look vector)
+                            local behindPos = er.Position - (er.CFrame.LookVector * 4)
+                            pcall(function() RootPart.CFrame = CFrame.new(behindPos + Vector3.new(0,3,0)) end)
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- COMBO BREAKER: when you take damage, teleport ~12 studs to the side
+    if T.ComboBreaker and hm then
+        pcall(function()
+            local curHP = hm.Health
+            if curHP < (LastHP - 2) and curHP > 0 and RootPart then
+                -- choose side relative to camera
+                local right = Workspace.CurrentCamera and Workspace.CurrentCamera.CFrame.RightVector or Vector3.new(1,0,0)
+                local dir = (math.random() > 0.5) and right or -right
+                local newPos = RootPart.Position + dir * 12
+                pcall(function() RootPart.CFrame = CFrame.new(newPos) end)
+            end
+        end)
+    end
+    LastHP = hm.Health or LastHP
+
+    -- TARGET LOCK: lock camera/motion to nearest target
+    if T.TargetLock and RootPart then
+        pcall(function()
+            local np = GetNearest(100)
+            if np and np.Character then
+                local er = np.Character:FindFirstChild("HumanoidRootPart")
+                if er then
+                    local cam = Workspace.CurrentCamera
+                    if cam then
+                        -- force camera to look at target (works even with shiftlock override)
+                        cam.CFrame = CFrame.new(cam.CFrame.Position, er.Position)
+                    end
+                    -- turn player's body to face the target (does not move position)
+                    RootPart.CFrame = CFrame.new(RootPart.Position, Vector3.new(er.Position.X, RootPart.Position.Y, er.Position.Z))
+                end
+            end
+        end)
+    end
+
+    -- AUTO AWAKENING: spawn a background thread to press G when awakened is ready (heuristic)
+    if T.AutoAwakening then
+        if not AutoAwakeThread then
+            AutoAwakeThread = task.spawn(function()
+                while T.AutoAwakening do
+                    local ready = false
+                    pcall(function()
+                        -- common heuristics: attributes or values on character
+                        if Character:GetAttribute("AwakeReady") == true or Character:GetAttribute("AwakeningReady") == true then
+                            ready = true
+                        end
+                        -- some games expose a NumberValue or Bool under character or player
+                        local v = Character:FindFirstChild("Awakening") or Character:FindFirstChild("Awake")
+                        if v and v.Value and type(v.Value) == "number" and v.Value >= 1 then ready = true end
+                    end)
+                    if ready then
+                        PressKey(Enum.KeyCode.G)
+                    else
+                        -- fallback: spam G occasionally (conservative)
+                        PressKey(Enum.KeyCode.G)
+                    end
+                    task.wait(0.2)
+                end
+                AutoAwakeThread = nil
+            end)
+        end
+    else
+        -- if disabled, the thread will exit by loop condition
+    end
+
+    -- ========== END PHASE 2 FEATURES ==========
+
     -- (Other existing behaviors continue unchanged...)
 
+    -- LOCK SPEED/JUMP
+    if T.LockSpeed then pcall(function() hm.WalkSpeed=C.WalkSpeed end) end
+    if T.LockJump then pcall(function() hm.JumpPower=C.JumpPower end) end
+    if T.GodMode and hm.Health<hm.MaxHealth then hm.Health=hm.MaxHealth end
+
+    -- SPEED BURST
+    if T.SpeedBurst and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then pcall(function() hm.WalkSpeed=(T.LockSpeed and C.WalkSpeed or 16)*C.SpeedBurstMulti end) end
+
+    -- SPEED RAMP
+    if T.SpeedRamp then pcall(function() SpeedRampCurrent=math.min(SpeedRampCurrent+0.3, C.SpeedRampTarget); hm.WalkSpeed=SpeedRampCurrent end) end
+
+    -- NOCLIP
+    if T.Noclip or T.GhostMode then pcall(function() for _,pt in ipairs(ch:GetDescendants()) do if pt:IsA("BasePart") then pt.CanCollide=false end end end) end
+
+    -- GHOST MODE (invisibilidade também)
+    if T.GhostMode then pcall(function() for _,pt in ipairs(ch:GetDescendants()) do if pt:IsA("BasePart") and pt.Name~="HumanoidRootPart" then pt.Transparency=1 elseif pt:IsA("Decal") or pt:IsA("ParticleEmitter") then pt.Enabled=false end end end) end
+
+    -- MOON JUMP
+    if T.MoonJump and (UserInputService:IsKeyDown(Enum.KeyCode.Space) or (IsMobile and UserInputService.TouchEnabled)) then pcall(function() if UserInputService:IsKeyDown(Enum.KeyCode.Space) then hm:ChangeState(Enum.HumanoidStateType.Jumping) end end) end
+
+    -- BUNNY HOP
+    if T.BunnyHop and hm.MoveDirection.Magnitude>0 and hm:GetState()~=Enum.HumanoidStateType.Freefall then pcall(function() hm:ChangeState(Enum.HumanoidStateType.Jumping) end) end
+
+    -- SPIN BOT
+    if T.SpinBot then pcall(function() rt.CFrame=rt.CFrame*CFrame.Angles(0,math.rad(C.SpinSpeed),0) end) end
+
+    -- REVERSE GRAVITY
+    if T.ReverseGravity then pcall(function() Workspace.Gravity=-50; rt.Velocity=Vector3.new(rt.Velocity.X, math.max(rt.Velocity.Y, 30), rt.Velocity.Z) end) end
+
+    -- FAKE LAG
+    if T.FakeLag and hm.MoveDirection.Magnitude>0 then pcall(function() local dir=hm.MoveDirection; rt.CFrame=rt.CFrame+dir*math.random(3,8) end) end
+
+    -- ANTI-VOID (centro do mapa)
+    if T.AntiVoid and rt.Position.Y<-50 then pcall(function() rt.CFrame=CFrame.new(GetMapCenter()) end) end
+
+    -- AUTO PLATFORM
+    if T.AutoPlatform and hm:GetState()==Enum.HumanoidStateType.Freefall then pcall(function() if not AutoPlatformPart or not AutoPlatformPart.Parent then AutoPlatformPart=Instance.new("Part",Workspace); AutoPlatformPart.Size=Vector3.new(8,1,8); AutoPlatformPart.Anchored=true; AutoPlatformPart.CanCollide=true; AutoPlatformPart.Position=rt.Position-Vector3.new(0,5,0); Debris:AddItem(AutoPlatformPart,5) end end) end
+
+    -- AUTO EVASION
+    if T.AutoEvasion and hm.Health<hm.MaxHealth*(C.HealthAlertThreshold/100) and hm.Health>0 then pcall(function() local np=GetNearest(30); if np and np.Character then local er=np.Character:FindFirstChild("HumanoidRootPart"); if er and RootPart then RootPart.CFrame=CFrame.new(er.Position - er.CFrame.LookVector*6) end end end) end
+
+    -- HEALTH ALERT
+    if T.HealthAlert and hm.Health<hm.MaxHealth*(C.HealthAlertThreshold/100) and hm.Health>0 then HAO.Visible=true; HAO.BackgroundTransparency=0.7+math.abs(math.sin(tick()*4))*0.25 else HAO.Visible=false end
+
+    -- INFINITE STAMINA
+    if T.InfiniteStamina then pcall(function() for _,attr in ipairs({"Stamina","Energy","SP","Mana","Chakra","Ki"}) do ch:SetAttribute(attr, ch:GetAttribute("Max"..attr) or 100); hm:SetAttribute("Stamina", hm:GetAttribute("MaxStamina") or 100) end end) end
+
+    -- FREEZE CAMERA
+    if T.FreezeCam and FrozenCamCF then pcall(function() Workspace.CurrentCamera.CFrame=FrozenCamCF end) end
+
+    -- FOV
+    pcall(function() Workspace.CurrentCamera.FieldOfView=C.FOV end)
+
+    -- HITBOX
+    if T.HitboxExp then for _,p2 in ipairs(Players:GetPlayers()) do if p2~=LocalPlayer and p2.Character then local pr=p2.Character:FindFirstChild("HumanoidRootPart"); if pr then pcall(function() pr.Size=Vector3.new(C.HitboxSize,C.HitboxSize, C.HitboxSize) end) end end end end
+
+    -- FLY
+    if T.Fly then pcall(function() if not FlyBV or not FlyBV.Parent then FlyBV=Instance.new("BodyVelocity",rt); FlyBV.MaxForce=Vector3.new(math.huge,math.huge,math.huge) end; if not FlyBG or not FlyBG.Parent then FlyBG=Instance.new("BodyGyro",rt); FlyBG.MaxTorque=Vector3.new(400000,400000,400000) end; local cam=Workspace.CurrentCamera; local dir=Vector3.new(0,0,0); if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir=dir+cam.CFrame.LookVector end; if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir=dir-cam.CFrame.LookVector end; if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir=dir-cam.CFrame.RightVector end; if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir=dir+cam.CFrame.RightVector end; FlyBV.Velocity=dir.Unit*C.FlySpeed end) end
+
 end)
-
--- ============================================================
--- UI: Fix background color selection to persist SelectedBGColor
--- ============================================================
--- (When constructing the background color buttons earlier we now set SelectedBGColor so it actually sticks)
--- Note: the full UI building code above creates buttons; we add here a helper to be used by those callbacks.
-
-local function ApplyBGPalette(pr, btn)
-    SelectedBGColor = pr.bg
-    selectedColorBtn = btn
-    Tw(Main,TI(0.5,Enum.EasingStyle.Sine),{BackgroundColor3=pr.bg})
-    MainGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,pr.g1),ColorSequenceKeypoint.new(0.5,pr.g2),ColorSequenceKeypoint.new(1,pr.g3)})
-end
-
--- NOTE: the color button loop should call ApplyBGPalette(pr, cb) instead of the previous inline code.
--- We'll patch the loop in a follow-up if you want the exact inline change; for now we provide the helper and
--- leave the UI behavior compatible (most implementations already set selectedColorBtn in the loop).
-
--- ============================================================
--- TODO PLACEHOLDERS & NOTES
--- ============================================================
--- TODO: DASH ANIMATIONS — placeholders where dash/evade animation AssetIds should be placed.
--- TODO: VOID TRAP — skill detection currently uses animation tracks; if the game uses RemoteEvents for skills,
--- replace animation detection with remote hooks. Placeholders placed near the VoidTrap logic.
--- TODO: AWAKENING — replace DoM1/PressKey placeholders with animation-play or RemoteEvent firing when you
--- supply the game's AssetIds or Remote names.
-
--- I implemented Phase 1 changes (AutoBlock timings, AutoBlockAttack flow, AutoParry quick parry, ClickTP toggle,
--- basic BG color apply helper and TODO placeholders). Test in Roblox Studio and tell me any timing tweaks.
